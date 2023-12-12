@@ -107,21 +107,29 @@ __global__ void computeErrorKernel(REAL *sunspots, REAL mean, REAL *error, int s
 /******************************************************************************
                           I N I T I A L I Z A T I O N
  ******************************************************************************/
-__global__ void initializeRandomWeights(REAL* weight, int numUnitsPrevLayer, int numUnitsCurrLayer, unsigned long seed) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < numUnitsCurrLayer * (numUnitsPrevLayer + 1)) {
+__global__ void initializeRandomWeights(REAL** weight, int numUnitsPrevLayer, int numUnitsCurrLayer, unsigned long seed) {
+    int i = blockIdx.y * blockDim.y + threadIdx.y;
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (i < numUnitsCurrLayer && j < (numUnitsPrevLayer + 1)) {
+        int idx = i * (numUnitsPrevLayer + 1) + j;
+
         curandState state;
         curand_init(seed, idx, 0, &state);
-        weight[idx] = curand_uniform(&state) - 0.5; // Generates values between -0.5 and 0.5
+
+        weight[i][j] = curand_uniform(&state) - 0.5; // Generates values between -0.5 and 0.5
     }
 }
-/******************************************************************************
+/******************************************************i************************
             S U P P O R T   F O R   S T O P P E D   T R A I N I N G
  ******************************************************************************/
-__global__ void saveWeightsKernel(REAL* weight, REAL* weightSave, int numWeights) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < numWeights) {
-        weightSave[idx] = weight[idx];
+__global__ void saveWeightsKernel(REAL** weight, REAL** weightSave, int numUnitsPrevLayer, int numUnitsCurrLayer) {
+    int i = blockIdx.y * blockDim.y + threadIdx.y;
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (i < numUnitsCurrLayer && j < (numUnitsPrevLayer + 1)) {
+        //int idx = i * (numUnitsPrevLayer + 1) + j;
+        weightSave[i][j] = weight[i][j];
     }
 }
 
@@ -188,4 +196,3 @@ __global__ void adjustWeightsKernel(REAL* lowerOutput, REAL* upperError, REAL* w
 /******************************************************************************
                       S I M U L A T I N G   T H E   N E T
  ******************************************************************************/
-

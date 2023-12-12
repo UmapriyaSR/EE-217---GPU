@@ -196,10 +196,15 @@ void SaveWeightsCUDA(NET* Net) {
     int blocks;
 
     for (int l = 1; l < NUM_LAYERS; l++) {
-        int numWeights = Net->Layer[l]->Units * (Net->Layer[l-1]->Units + 1);
-        blocks = (numWeights + threadsPerBlock - 1) / threadsPerBlock;
+        int numUnitsPrevLayer = Net->Layer[l-1]->Units;
+        int numUnitsCurrLayer = Net->Layer[l]->Units;
+ 
+        blocks = (numUnitsCurrLayer + threadsPerBlock - 1) / threadsPerBlock;
 
-        saveWeightsKernel<<<blocks, threadsPerBlock>>>(Net->Layer[l]->Weight, Net->Layer[l]->WeightSave, numWeights);
+        saveWeightsKernel<<<blocks, threadsPerBlock>>>(Net->Layer[l]->Weight, 
+            Net->Layer[l]->WeightSave, 
+            numUnitsPrevLayer, 
+            numUnitsCurrLayer);
     }
 
     // Error checking and synchronization
@@ -522,12 +527,12 @@ int main() {
         TrainNetCUDA(&Net, 10);  // CUDA version
         TestNetCUDA(&Net);       // CUDA version
 
-        if (Net.TestError < MinTestError) {
+        if (TestError < MinTestError) {
             fprintf(f, " - saving Weights ...\n");
-            MinTestError = Net.TestError;
+            MinTestError = TestError;
             SaveWeightsCUDA(&Net);  // CUDA version
         }
-        else if (Net.TestError > 1.2 * MinTestError) {
+        else if (TestError > 1.2 * MinTestError) {
             fprintf(f, " - stopping Training and restoring Weights ...\n");
             Stop = TRUE;
             RestoreWeightsCUDA(&Net);  // CUDA version
@@ -543,4 +548,3 @@ int main() {
 
     return 0;
 }
-

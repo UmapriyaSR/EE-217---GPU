@@ -1,3 +1,5 @@
+#ifndef DECLARATION_H
+#define DECLARATION_H
 typedef int           BOOL;
 typedef int           INT;
 typedef double        REAL;
@@ -119,3 +121,4 @@ REAL                  TestErrorPredictingMean;
 
 FILE*                 f;
 
+#endif

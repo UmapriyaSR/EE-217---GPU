@@ -1,209 +1,170 @@
+#include<cuda_runtime.h>
 #include <stdio.h>
 #include "kernel.cu"
 #include "declaration.h"
+#include <math.h>
+#define MIN_REAL      -HUGE_VAL
+#define MAX_REAL      +HUGE_VAL
 
-int main() {
-    NET Net;
-    BOOL Stop;
-    REAL MinTestError;
+#define NUM_RNG 1 //has to be based on number of threads we can change this later
+#define FATAL(msg) \
+    do { \
+        fprintf(stderr, "Error: %s\n", msg); \
+        exit(EXIT_FAILURE); \
+    } while (0)
+const int blockSize = 256;
+const int gridSize = (NUM_YEARS + blockSize - 1) / blockSize;
 
-    // Initialize network, random weights, and application
-    InitializeRandoms();
-    GenerateNetworkCUDA(&Net); // CUDA version
-    RandomWeightsCUDA(&Net);   // CUDA version
-    InitializeApplicationCUDA(&Net); // CUDA version
 
-    Stop = FALSE;
-    MinTestError = MAX_REAL;
-    do {
-        TrainNetCUDA(&Net, 10);  // CUDA version
-        TestNetCUDA(&Net);       // CUDA version
-
-        if (Net.TestError < MinTestError) {
-            fprintf(f, " - saving Weights ...\n");
-            MinTestError = Net.TestError;
-            SaveWeightsCUDA(&Net);  // CUDA version
-        }
-        else if (Net.TestError > 1.2 * MinTestError) {
-            fprintf(f, " - stopping Training and restoring Weights ...\n");
-            Stop = TRUE;
-            RestoreWeightsCUDA(&Net);  // CUDA version
-        }
-    } while (!Stop);
-
-    TestNetCUDA(&Net);           // CUDA version
-    EvaluateNetCUDA(&Net);       // CUDA version if applicable
-
-    FinalizeApplicationCUDA(&Net); // CUDA version
-
-    // Additional cleanup as needed, especially for GPU resources
-
-    return 0;
-}
 /******************************************************************************
                A P P L I C A T I O N - S P E C I F I C   C O D E
  ******************************************************************************/
 
-void NormalizeSunspotsCUDA(REAL *sunspots, REAL *normalized, int size) {
-    REAL *d_sunspots, *d_min, *d_max;
-    REAL h_min = MAX_REAL, h_max = MIN_REAL;
-    
-    // Allocate device memory
-    cuda_ret =  cudaMalloc((void **)&d_sunspots, size * sizeof(REAL));
-    if(cuda_ret != cudaSuccess) FATAL("Unable to copy memory to the device");
+void NormalizeSunspotsCUDA() {
+    REAL *dev_sunspots, *dev_min, *dev_max, *dev_mean;
+    REAL host_min=MIN_REAL, host_max=MIN_REAL, host_mean=0;
+    // Allocate memory on the device
+    cudaMalloc((void **)&dev_sunspots, NUM_YEARS * sizeof(REAL));
+    cudaMalloc((void **)&dev_min, sizeof(REAL));
+    cudaMalloc((void **)&dev_max, sizeof(REAL));
+    cudaMalloc((void **)&dev_mean, sizeof(REAL));
 
-    cuda_ret = cudaMalloc((void **)&d_min, sizeof(REAL));
-    if(cuda_ret != cudaSuccess) FATAL("Unable to copy memory to the device");
+    // Copy data from host to device
+    cudaMemcpy(dev_sunspots, Sunspots, NUM_YEARS * sizeof(REAL), cudaMemcpyHostToDevice);
+    cudaMemcpy(dev_min, &host_min, sizeof(REAL), cudaMemcpyHostToDevice);
+    cudaMemcpy(dev_max, &host_max, sizeof(REAL), cudaMemcpyHostToDevice);
+    cudaMemset(dev_mean,0, sizeof(REAL));
 
-    cuda_ret =  cudaMalloc((void **)&d_max, sizeof(REAL));
-    if(cuda_ret != cudaSuccess) FATAL("Unable to copy memory to the device");
+    // Launch kernels (you need to define grid and block sizes)
+    findMinKernel<<<gridSize, blockSize>>>(dev_sunspots, dev_min, NUM_YEARS);
+    findMaxKernel<<<gridSize, blockSize>>>(dev_sunspots, dev_max, NUM_YEARS);
+    normalizeSunspotsKernel<<<gridSize, blockSize>>>(dev_sunspots, host_min, host_max, dev_mean, NUM_YEARS, LO, HI);
 
+    // Copy results back to host
+    cudaMemcpy(&host_min, dev_min, sizeof(REAL), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&host_max, dev_max, sizeof(REAL), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&Mean, dev_mean, sizeof(REAL), cudaMemcpyDeviceToHost);
+    cudaMemcpy(Sunspots, dev_sunspots, NUM_YEARS * sizeof(REAL), cudaMemcpyDeviceToHost);
 
-    // Copy data to device
-    cuda_ret = cudaMemcpy(d_sunspots, sunspots, size * sizeof(REAL), cudaMemcpyHostToDevice);
-    if(cuda_ret != cudaSuccess) FATAL("Unable to copy memory to the device");
-
-    cuda_ret = cudaMemcpy(d_min, &h_min, sizeof(REAL), cudaMemcpyHostToDevice);
-    if(cuda_ret != cudaSuccess) FATAL("Unable to copy memory to the device");
-
-    cuda_ret = cudaMemcpy(d_max, &h_max, sizeof(REAL), cudaMemcpyHostToDevice);
-    if(cuda_ret != cudaSuccess) FATAL("Unable to copy memory to the device");
-
-    // Launch kernels
-    int blockSize = 256;  // Adjust as necessary
-    int numBlocks = (size + blockSize - 1) / blockSize;
-    findMinKernel<<<numBlocks, blockSize>>>(d_sunspots, d_min, size);
-    findMaxKernel<<<numBlocks, blockSize>>>(d_sunspots, d_max, size);
-
-    // Copy back the results
-    cudaMemcpy(&h_min, d_min, sizeof(REAL), cudaMemcpyDeviceToHost);
-    if(cuda_ret != cudaSuccess) FATAL("Unable to copy memory to the device");
-
-    cudaMemcpy(&h_max, d_max, sizeof(REAL), cudaMemcpyDeviceToHost);
-    if(cuda_ret != cudaSuccess) FATAL("Unable to copy memory to the device");
-
-
-    // Normalize
-    normalizeSunspotsKernel<<<numBlocks, blockSize>>>(d_sunspots, normalized, h_min, h_max, size);
-
-    // Clean up
-    cudaFree(d_sunspots);
-    cudaFree(d_min);
-    cudaFree(d_max);
+    // Free device memory
+    cudaFree(dev_sunspots);
+    cudaFree(dev_min);
+    cudaFree(dev_max);
+    cudaFree(dev_mean);
 }
-
-void InitializeApplicationCUDA(NET* Net, REAL *d_sunspots, REAL *d_error) {
-    INT Year, i;
-    REAL h_error = 0.0;
-
+void InitializeApplicationCUDA(NET* Net) {
     // Set network parameters
     Net->Alpha = 0.5;
     Net->Eta   = 0.05;
     Net->Gain  = 1;
 
-    // Normalize sunspots (assuming this is already adapted for CUDA)
-    NormalizeSunspotsCUDA(d_sunspots);
+    // Normalize sunspots (assuming NormalizeSunspots is also implemented in CUDA)
+    NormalizeSunspotsCUDA();
 
-    // Allocate device memory for error
-    cuda_ret = cudaMalloc((void **)&d_error, sizeof(REAL));
-    if(cuda_ret != cudaSuccess) FATAL("Unable to copy allocate device memory");
+    // Allocate memory for sunspots array on GPU
+    REAL *dev_sunspots;
+    cudaMalloc((void **)&dev_sunspots, NUM_YEARS * sizeof(REAL));
+    cudaMemcpy(dev_sunspots, Sunspots, NUM_YEARS * sizeof(REAL), cudaMemcpyHostToDevice);
 
-    cuda_ret = cudaMemcpy(d_error, &h_error, sizeof(REAL), cudaMemcpyHostToDevice);
-    if(cuda_ret != cudaSuccess) FATAL("Unable to copy memory to the device");
+    // Calculate training and testing errors
+    REAL *dev_trainError, *dev_testError;
+    REAL trainError = 0, testError = 0;
+    cudaMalloc((void **)&dev_trainError, sizeof(REAL));
+    cudaMalloc((void **)&dev_testError, sizeof(REAL));
+    cudaMemset(dev_trainError, 0, sizeof(REAL));
+    cudaMemset(dev_testError, 0, sizeof(REAL));
 
-    // Launch kernel for TrainErrorPredictingMean
-    int blockSize = 256; // Adjust as necessary
-    int numBlocks = ((TRAIN_UPB - TRAIN_LWB + 1) * M + blockSize - 1) / blockSize;
-    computeErrorKernel<<<numBlocks, blockSize>>>(d_sunspots, Mean, d_error, TRAIN_LWB, TRAIN_UPB, M, N);
+    // Launch kernels for error calculations (grid and block sizes need to be set)
+    computeErrorKernel<<<gridSize, blockSize>>>(dev_sunspots, Mean, dev_trainError, TRAIN_LWB, TRAIN_UPB, M);
+    computeErrorKernel<<<gridSize, blockSize>>>(dev_sunspots, Mean, dev_testError, TEST_LWB, TEST_UPB, M);
 
-    // Copy back and accumulate the results
-    cuda_ret = cudaMemcpy(&h_error, d_error, sizeof(REAL), cudaMemcpyDeviceToHost);
-    if(cuda_ret != cudaSuccess) FATAL("Unable to copy memory to the device");
+    // Copy error results back to host
+    cudaMemcpy(&trainError, dev_trainError, sizeof(REAL), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&testError, dev_testError, sizeof(REAL), cudaMemcpyDeviceToHost);
 
-    TrainErrorPredictingMean = h_error;
+    // Update global variables
+    TrainErrorPredictingMean = trainError;
+    TestErrorPredictingMean = testError;
 
-    // Reset error for next computation
-    h_error = 0.0;
-    cuda_ret = cudaMemcpy(d_error, &h_error, sizeof(REAL), cudaMemcpyHostToDevice);
-    if(cuda_ret != cudaSuccess) FATAL("Unable to copy memory to the device");
+    // Free device memory
+    cudaFree(dev_sunspots);
+    cudaFree(dev_trainError);
+    cudaFree(dev_testError);
 
-    // Launch kernel for TestErrorPredictingMean
-    numBlocks = ((TEST_UPB - TEST_LWB + 1) * M + blockSize - 1) / blockSize;
-    computeErrorKernel<<<numBlocks, blockSize>>>(d_sunspots, Mean, d_error, TEST_LWB, TEST_UPB, M, N);
-
-    // Copy back and accumulate the results
-    cuda_ret = cudaMemcpy(&h_error, d_error, sizeof(REAL), cudaMemcpyDeviceToHost);
-    if(cuda_ret != cudaSuccess) FATAL("Unable to copy memory to the device");
-
-    TestErrorPredictingMean = h_error;
-
-    // Open file
+    // File operations remain on the CPU
     f = fopen("BPN.txt", "w");
-
-    // Clean up
-    cudaFree(d_error);
 }
 void FinalizeApplicationCUDA(NET* Net) {
     fclose(f);
 }
 
 void RandomWeightsCUDA(NET* Net) {
-    INT l, i, j;
-    for (l = 1; l < NUM_LAYERS; l++) {
-        for (i = 1; i <= Net->Layer[l]->Units; i++) {
-            int size = Units[l-1] + 1;
-            RandomWeightsKernel<<<(size + 255) / 256, 256>>>(Net->Layer[l]->Weight[i], size);
-            // Handle cudaDeviceSynchronize and error checking
-        }
+    unsigned long seed = 1234; // Example seed
+    int threadsPerBlock = 256;
+    int blocks;
+
+    for (int l = 1; l < NUM_LAYERS; l++) {
+        blocks = (Net->Layer[l]->Units * (Net->Layer[l-1]->Units + 1) + threadsPerBlock - 1) / threadsPerBlock;
+        initializeRandomWeights<<<blocks, threadsPerBlock>>>(Net->Layer[l]->Weight, Net->Layer[l-1]->Units, Net->Layer[l]->Units, seed);
+    }
+
+    // Synchronize and check for errors
+    cudaDeviceSynchronize();
+    cudaError_t error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        fprintf(stderr, "CUDA error: %s\n", cudaGetErrorString(error));
+        exit(EXIT_FAILURE);
     }
 }
-
 /******************************************************************************
                           I N I T I A L I Z A T I O N
  ******************************************************************************/
-
-
 void GenerateNetworkCUDA(NET* Net) {
     INT l, i;
+    cudaError_t cuda_ret;
 
     // Allocate memory for layers on the host
     Net->Layer = (LAYER**) malloc(NUM_LAYERS * sizeof(LAYER*));
-   
+
     for (l = 0; l < NUM_LAYERS; l++) {
-        // Allocate each layer on the host
         Net->Layer[l] = (LAYER*) malloc(sizeof(LAYER));
         Net->Layer[l]->Units = Units[l];
 
         // Allocate Output and Error arrays for each layer on the GPU
-	cuda_ret = cudaMalloc((void**)&(Net->Layer[l]->Output), (Units[l] + 1) * sizeof(REAL));
-        if(cuda_ret != cudaSuccess) FATAL("Unable to allocate memory to the device");
-        cuda_ret = cudaMalloc((void**)&(Net->Layer[l]->Error), (Units[l] + 1) * sizeof(REAL));
-        if(cuda_ret != cudaSuccess) FATAL("Unable to allocate memory to the device");
-        // Initialize the first element of Output array to BIAS
-        if (l == 0) {
-            cuda_ret = cudaMemcpy(Net->Layer[l]->Output, &BIAS, sizeof(REAL), cudaMemcpyHostToDevice);
-            if(cuda_ret != cudaSuccess) FATAL("Unable to copy memory to the device");
-         }
+        cuda_ret = cudaMalloc((void**)&(Net->Layer[l]->Output), (Units[l] + 1) * sizeof(REAL));
+        if (cuda_ret != cudaSuccess) {
+            fprintf(stderr, "Failed to allocate device memory - Output\n");
+            exit(EXIT_FAILURE);
+        }
 
-        // For layers other than the input layer, allocate Weight, WeightSave, and dWeight arrays
+        cuda_ret = cudaMalloc((void**)&(Net->Layer[l]->Error), (Units[l] + 1) * sizeof(REAL));
+        if (cuda_ret != cudaSuccess) {
+            fprintf(stderr, "Failed to allocate device memory - Error\n");
+            exit(EXIT_FAILURE);
+        }
+
+        // Initialize the first element of Output array to BIAS
+        cuda_ret = cudaMemcpy(Net->Layer[l]->Output, &BIAS, sizeof(REAL), cudaMemcpyHostToDevice);
+        if (cuda_ret != cudaSuccess) {
+            fprintf(stderr, "Failed to copy data to device - Output[0]\n");
+            exit(EXIT_FAILURE);
+        }
+
+        // Allocate Weight, WeightSave, and dWeight arrays
         if (l != 0) {
-           cuda_ret =  cudaMalloc((void**)&(Net->Layer[l]->Weight), (Units[l] + 1) * sizeof(REAL*));
-           if(cuda_ret != cudaSuccess) FATAL("Unable to allocate memory to the device");
-           cuda_ret =  cudaMalloc((void**)&(Net->Layer[l]->WeightSave), (Units[l] + 1) * sizeof(REAL*));
-           if(cuda_ret != cudaSuccess) FATAL("Unable to allocate memory to the device");
-           cuda_ret =  cudaMalloc((void**)&(Net->Layer[l]->dWeight), (Units[l] + 1) * sizeof(REAL*));
-           if(cuda_ret != cudaSuccess) FATAL("Unable to allocate memory to the device");
             for (i = 1; i <= Units[l]; i++) {
                 cuda_ret = cudaMalloc((void**)&(Net->Layer[l]->Weight[i]), (Units[l-1] + 1) * sizeof(REAL));
-                if(cuda_ret != cudaSuccess) FATAL("Unable to allocate memory to the device");
                 cuda_ret = cudaMalloc((void**)&(Net->Layer[l]->WeightSave[i]), (Units[l-1] + 1) * sizeof(REAL));
-                if(cuda_ret != cudaSuccess) FATAL("Unable to allocate memory to the device");
                 cuda_ret = cudaMalloc((void**)&(Net->Layer[l]->dWeight[i]), (Units[l-1] + 1) * sizeof(REAL));
-                if(cuda_ret != cudaSuccess) FATAL("Unable to allocate memory to the device");
+
+                // Add error checking for each cudaMalloc
+                if (cuda_ret != cudaSuccess) {
+                    fprintf(stderr, "Failed to allocate device memory - Weights\n");
+                    exit(EXIT_FAILURE);
+                }
             }
         }
     }
-
     // Initialize other network properties
     Net->InputLayer = Net->Layer[0];
     Net->OutputLayer = Net->Layer[NUM_LAYERS - 1];
@@ -211,6 +172,8 @@ void GenerateNetworkCUDA(NET* Net) {
     Net->Eta = 0.25;
     Net->Gain = 1;
 }
+
+       
 
 void SetInputCUDA(NET* Net, REAL* h_Input) {
     // Assuming Net->InputLayer->Output is already allocated on the GPU
@@ -229,35 +192,40 @@ void GetOutputCUDA(NET* Net, REAL* h_Output) {
             S U P P O R T   F O R   S T O P P E D   T R A I N I N G
  ******************************************************************************/
 void SaveWeightsCUDA(NET* Net) {
-    INT l, i;
-    size_t size;
+    int threadsPerBlock = 256;
+    int blocks;
 
-    for (l = 1; l < NUM_LAYERS; l++) {
-        for (i = 1; i <= Net->Layer[l]->Units; i++) {
-            size = (Net->Layer[l-1]->Units + 1) * sizeof(REAL);
-            cudaMemcpy(Net->Layer[l]->WeightSave[i], Net->Layer[l]->Weight[i], size, cudaMemcpyDeviceToDevice);
-            // Error checking for cudaMemcpy
-        }
+    for (int l = 1; l < NUM_LAYERS; l++) {
+        int numWeights = Net->Layer[l]->Units * (Net->Layer[l-1]->Units + 1);
+        blocks = (numWeights + threadsPerBlock - 1) / threadsPerBlock;
+
+        saveWeightsKernel<<<blocks, threadsPerBlock>>>(Net->Layer[l]->Weight, Net->Layer[l]->WeightSave, numWeights);
     }
+
+    // Error checking and synchronization
+    cudaDeviceSynchronize();
+    // ... (Error handling code)
 }
+
 void RestoreWeightsCUDA(NET* Net) {
-    INT l, i;
-    size_t size;
+    int threadsPerBlock = 256;
+    int blocks;
 
-    for (l = 1; l < NUM_LAYERS; l++) {
-        for (i = 1; i <= Net->Layer[l]->Units; i++) {
-            size = (Net->Layer[l-1]->Units + 1) * sizeof(REAL);
-            cudaMemcpy(Net->Layer[l]->Weight[i], Net->Layer[l]->WeightSave[i], size, cudaMemcpyDeviceToDevice);
-            // Error checking for cudaMemcpy
-        }
+    for (int l = 1; l < NUM_LAYERS; l++) {
+        int numWeights = Net->Layer[l]->Units * (Net->Layer[l-1]->Units + 1);
+        blocks = (numWeights + threadsPerBlock - 1) / threadsPerBlock;
+
+        restoreWeightsKernel<<<blocks, threadsPerBlock>>>(Net->Layer[l]->Weight, Net->Layer[l]->WeightSave, numWeights);
     }
-}
 
+    // Error checking and synchronization
+    cudaDeviceSynchronize();
+    // ... (Error handling code)
+}
 /******************************************************************************
                      P R O P A G A T I N G   S I G N A L S
  ******************************************************************************/
-
-void PropagateNetCUDA(NET* Net) {
+void PropogateNetCUDA(NET* Net) {
     int blockSize = 256; // Adjust as necessary
 
     for (int l = 0; l < NUM_LAYERS - 1; l++) {
@@ -273,7 +241,13 @@ void PropagateNetCUDA(NET* Net) {
             Net->Gain
         );
 
-        // Handle cudaDeviceSynchronize and error checking
+        // Error checking and synchronization
+        cudaDeviceSynchronize();
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            fprintf(stderr, "CUDA Error: %s\n", cudaGetErrorString(err));
+            // Handle the error appropriately
+        }
     }
 }
 
@@ -291,10 +265,13 @@ void ComputeOutputErrorCUDA(NET* Net, REAL* d_Target) {
     cudaMemcpy(d_NetError, &h_NetError, sizeof(REAL), cudaMemcpyHostToDevice);
 
     ComputeOutputErrorKernel<<<numBlocks, blockSize>>>(
-        Net->OutputLayer->Output, d_Target, Net->OutputLayer->Error, d_NetError, 
-        Net->OutputLayer->Units, Net->Gain
+        Net->OutputLayer->Output,
+        Target,
+        Net->OutputLayer->Error,
+        Net->Gain,
+        Net->OutputLayer->Units,
+        d_NetError
     );
-
     // Handle cudaDeviceSynchronize and error checking
 
     cudaMemcpy(&h_NetError, d_NetError, sizeof(REAL), cudaMemcpyDeviceToHost);
@@ -313,6 +290,13 @@ void BackpropagateLayerCUDA(NET* Net, LAYER* Upper, LAYER* Lower) {
     );
 
     // Error checking and cudaDeviceSynchronize as needed
+    // Error checking and synchronization
+    cudaDeviceSynchronize();
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "CUDA Error: %s\n", cudaGetErrorString(err));
+        // Handle the error appropriately
+    }
 }
 
 void BackpropagateNetCUDA(NET* Net) {
@@ -344,6 +328,12 @@ void AdjustWeightsCUDA(NET* Net) {
         );
 
         // Error checking and cudaDeviceSynchronize as needed
+        cudaDeviceSynchronize();
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            fprintf(stderr, "CUDA Error: %s\n", cudaGetErrorString(err));
+            // Handle the error appropriately
+        }
     }
 }
 /******************************************************************************
@@ -505,3 +495,52 @@ void RandomEqualREALCUDA(curandState *state, REAL *output, REAL low, REAL high, 
     generateRandomRealsKernel<<<(n + 255) / 256, 256>>>(state, output, low, high, n);
     // Error checking
 }
+
+
+int main() {
+    NET Net;
+    BOOL Stop;
+    REAL MinTestError;
+    
+    //cudaError thingie
+    cudaError_t cuda_ret = cudaSuccess;
+    
+    //init cuda random states
+    curandState* devStates;
+
+
+    
+    // Initialize network, random weights, and application
+    InitializeRandomsCUDA(&devStates, NUM_RNG);
+    GenerateNetworkCUDA(&Net); // CUDA version
+    RandomWeightsCUDA(&Net);   // CUDA version
+    InitializeApplicationCUDA(&Net); // CUDA version
+
+    Stop = FALSE;
+    MinTestError = MAX_REAL;
+    do {
+        TrainNetCUDA(&Net, 10);  // CUDA version
+        TestNetCUDA(&Net);       // CUDA version
+
+        if (Net.TestError < MinTestError) {
+            fprintf(f, " - saving Weights ...\n");
+            MinTestError = Net.TestError;
+            SaveWeightsCUDA(&Net);  // CUDA version
+        }
+        else if (Net.TestError > 1.2 * MinTestError) {
+            fprintf(f, " - stopping Training and restoring Weights ...\n");
+            Stop = TRUE;
+            RestoreWeightsCUDA(&Net);  // CUDA version
+        }
+    } while (!Stop);
+
+    TestNetCUDA(&Net);           // CUDA version
+    EvaluateNetCUDA(&Net);       // CUDA version if applicable
+
+    FinalizeApplicationCUDA(&Net); // CUDA version
+
+    // Additional cleanup as needed, especially for GPU resources
+
+    return 0;
+}
+

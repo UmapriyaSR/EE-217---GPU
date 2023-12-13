@@ -144,7 +144,8 @@ void GenerateNetworkCUDA(NET* Net) {
         }
 
         // Initialize the first element of Output array to BIAS
-        cuda_ret = cudaMemcpy(Net->Layer[l]->Output, &BIAS, sizeof(REAL), cudaMemcpyHostToDevice);
+        REAL bias = BIAS; //temp BIAS 
+        cuda_ret = cudaMemcpy(Net->Layer[l]->Output, &bias, sizeof(REAL), cudaMemcpyHostToDevice);
         if (cuda_ret != cudaSuccess) {
             fprintf(stderr, "Failed to copy data to device - Output[0]\n");
             exit(EXIT_FAILURE);
